@@ -1,0 +1,195 @@
+---
+title: "BARRA weather data for NBR approach"
+author: Lulu He
+date: 05/07/2022
+output: html_notebook
+---
+# description
+This code is to pre-process BARRA weather data (RH, TEMP, Wind) on a specific day to be imported to fire behaviour model. This information will be used to compare against the Burn Severity as part of the 'fire scar' approach to model validation.
+
+# File path
+## one day weather event
+```{r define file path}
+#define the input file location
+RelHum <- file.path("C:/Users/a1677880/Model validation/NBR approach/BARRA data 2015 Feb 01/RelHum")
+Tem <- file.path("C:/Users/a1677880/Model validation/NBR approach/BARRA data 2015 Feb 01/Temp")
+Uwind <- file.path("C:/Users/a1677880/Model validation/NBR approach/BARRA data 2015 Feb 01/uwnd")
+Vwind <- file.path("C:/Users/a1677880/Model validation/NBR approach/BARRA data 2015 Feb 01/vwnd")
+
+#check if the input data loaded properly
+list.files(Tem, full.names = T)
+
+#define the output file to store processed data
+FileOutput <- file.path("C:/Users/a1677880/Model validation/NBR approach/BARRA data 2015 Feb 01/Pre-processed")
+# create the output folder if it doesn't exist 
+dir.create(FileOutput, recursive = TRUE)
+
+```
+
+## long-term climate processed file
+```{r file path}
+Input.file <- file.path("C:/Users/a1677880/Box/BNHCRC DSS Project/Case Studies/Western Australia/Data/SmartSat_Project")
+Input.climate <- file.path(Input.file, "Climate")
+Temp.long <- file.path(Input.climate, "MaxTemp/WA_BARRA_MaxTemp_100m_45_2018")
+list.files(Temp.long)
+
+```
+
+# Install packages
+
+```{r install packages}
+#install.packages("terra")
+library("terra")
+
+
+```
+
+# set up the study area and time range
+
+```{r set up the study area}
+# define the study location
+Study <- "Western Australia"
+
+# define the time range of interest. This will be the hours over which waether data will be summarised.This is 11.30am-17.30pm, AWST (Australian Western Standard Time), which corresponds to 3.30am-9.30am UTC.
+fire_hours <- c(12, 13, 14, 15, 16, 17)
+# define crs
+BARRA_CRS <- "epsg:4283" # this equals to geographic - WGS84
+Region.crs.projected <- "epsg:3577" # this equals to projected - GDA 94 - Albers
+
+```
+
+# create a template raster
+
+```{r}
+UNHaRMED_inputs_bushfire <- "C:/Users/a1677880/UNHaRMED WA SA/UNHaRMEDWesternAustralia/Data/Bushfire"
+UNHaRMED_inputs_veg <- file.path(UNHaRMED_inputs_bushfire, "Vegetation")
+
+# load the vegetation layer
+vegetation.type <- rast(file.path(UNHaRMED_inputs_veg, "Fuel_Model_reclassified_100m_GDA94_LU_clip.tif"))
+
+# create a template from this layer
+template.rast <- vegetation.type
+# change the cell values to NA
+template.rast[!is.na(template.rast)] <- NA # When setting template, we only need the resolution and extent info, but don't need the value of each cell in the layer, so we need to get rid of the value of each cell."!is.na" means select cells of which the value is not na. Then we assign NA to these cells. In R, exclamation mark "!" means the opposite. '! = "B"' means everything but B.
+```
+
+
+# Pre-processing
+##RH pre-process
+```{r pre-process RH: extract, mean value, reproject, resample, viewlise, export}
+# define data of interest
+time.10am_15pm <- "20150201T0000Z"
+time.16pm_21pm <- "20150201T0600Z"
+
+# Retrieve humidity data 10am-21pm AWST  (= 4-9am UTC)
+RelHum.list <- list.files(RelHum, pattern = "[.]nc$", full.names = TRUE)
+RelHum.data_15pm <- grep(time.10am_15pm, RelHum.list, value = TRUE)
+data.15pm.rast <- terra::rast(RelHum.data_15pm)
+#RelHum.data_21pm <- grep(time.16pm_21pm, RelHum.list, value = TRUE)
+#RelHum.data.10am_21pm <- c(RelHum.data_15pm, RelHum.data_21pm)
+#RelHum.raster <- terra::rast(RelHum.data.10am_21pm)
+#RH.time <- time(RelHum.raster)
+#time(data.15pm.rast)
+
+#get mean value of humidity
+RH.mean <- app(data.15pm.rast, mean)
+
+# re-project to region's CRS
+RH.mean.proj <- project(RH.mean, Region.crs.projected, res = c(1500, 1500))
+
+# resample to 100m resolution
+RH.mean.100m <- resample(RH.mean, template.rast, method = "near") #the output of this step's resolution and CRS should be the same as the template's (i.e., the vegetation layer)
+
+#visualise the result
+terra::plot(RH.mean.100m)
+
+#export the result to folder
+writeRaster(RH.mean.100m, file.path(FileOutput, "RH_100m.tif"), filetype = "GTiff", overwrite = TRUE)
+```
+
+##Temp pre-process
+```{r pre-process Temp: extract, mean value, reproject, resample, viewlise, export}
+# Retrieve temperature data 10am-21pm
+Temp.list <- list.files(Tem, pattern = "[.]nc$", full.names = TRUE)
+Temp.data_15pm <- grep(time.10am_15pm, Temp.list, value = TRUE)
+Temp.data_21pm <- grep(time.16pm_21pm, Temp.list, value = TRUE)
+Temp.data <- c(Temp.data_15pm, Temp.data_21pm)
+Temp.raster <- terra::rast(Temp.data)
+Temp.time <- time(Temp.raster) #get the time info of the raster layer
+
+#get the mean value of temp data
+Temp.mean <- app(Temp.raster, mean)
+
+#check if the data values make sense
+Spot.check <- values(Temp.raster) #Temp.mean[[1]][100]
+dim(Spot.check)
+#Temperature data should be converted from Kelvin to Celcius.
+Temp.degC <- Temp.mean - 273.15
+
+# re-project to region's CRS
+Temp.proj <- project(Temp.degC, Region.crs.projected, res = c(1500, 1500))
+
+# resample to 100m resolution
+Temp.100m <- resample(Temp.proj, template.rast, method="near") #the output of this step's resolution and CRS should be the same as the template's (i.e., the vegetation layer)
+
+#visualise the result
+terra::plot(Temp.100m)
+
+#export the result to folder
+writeRaster(Temp.100m, file.path(FileOutput, "Temp_100m.tif"), filetype = "GTiff", overwrite = TRUE)
+#terra::plot(Temp.degC)
+#Spot.check <- values(Temp.degC)
+#writeRaster(Temp.degC, filename = "temp.tif", filetype = "GTiff", overwrite = TRUE)
+```
+
+
+##Wind pre-process
+```{r pre-process wind data: extract, mean value, reproject, resample, viewlise, export}
+# Retrieve Vwind data 10am-21pm AWST  (4am-15pm UTC)
+VWind.list <- list.files(Vwind, pattern = "[.]nc$", full.names = TRUE)
+VWind.data_15pm <- grep(time.10am_15pm, VWind.list, value = TRUE)
+VWind.data_21pm <- grep(time.16pm_21pm, VWind.list, value = TRUE)
+VWind.data <- c(VWind.data_15pm, VWind.data_21pm)
+VWind.raster <- terra::rast(VWind.data)
+
+# Retrieve Uwind data 10am-21pm AWST  (4am-15pm UTC)
+UWind.list <- list.files(Uwind, pattern = "[.]nc$", full.names = TRUE)
+UWind.data_15pm <- grep(time.10am_15pm, UWind.list, value = TRUE)
+UWind.data_21pm <- grep(time.16pm_21pm, UWind.list, value = TRUE)
+UWind.data <- c(UWind.data_15pm, UWind.data_21pm)
+UWind.raster <- terra::rast(UWind.data)
+
+#re-extent Vwind data and UWind data to make their extent matches
+ext(VWind.raster) <- ext(UWind.raster)
+VWind.raster <- resample(VWind.raster, UWind.raster)
+
+#wind data should be resampled/recalculated using Pythagoras and converted to kmph. 
+#Wind direction is calculated using trigonometry and converted from polar coordinates in radians into cardinal/compass degrees.
+Wind.speed <- sqrt(VWind.raster^2 + UWind.raster^2)
+
+#convert to kmph
+wnd10m <- Wind.speed*60*60/1000
+wnd10m <- app(wnd10m, mean)
+
+#reproject
+wnd10m.proj <- project(wnd10m, Region.crs.projected, res = c(1500, 1500))
+
+#resample to 100m
+wnd10m.100m <- resample(wnd10m.proj, vegetation.type, method = "near")
+
+#visualise the result
+terra::plot(wnd10m.100m)
+
+# export to folder
+writeRaster(wnd10m.100m, filename = file.path(FileOutput, "wind.100m.tif"), filetype = "GTiff", overwrite = TRUE)
+```
+
+# calculate FFDI of the day
+```{r calculate FFDI}
+# as per CRUZ 2015, page 81
+relhum_Raster <- RH.mean.100m
+scrn_temp_Raster <- Temp.100m
+wnd10m_Raster <- wnd10m.100m 
+FFDI_Raster <- 2.0*exp(-0.450 + 0.987*log(10) - 0.0345*relhum_Raster +0.0338*scrn_temp_Raster + 0.0234*wnd10m_Raster)
+```
+
