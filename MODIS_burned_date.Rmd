@@ -1,0 +1,147 @@
+---
+title: "MODIS Burned area"
+author: "Amelie Jeanneau"
+date: "7 April 2022"
+params: 
+  d: !r Sys.Date()
+output:  
+  html_notebook 
+html_document:
+  toc: TRUE
+---
+
+# Description
+This script is used to calculate the `Time since last fire` from MODIS MCD64.
+
+# Load the packages
+
+Make sure you are using the latest version of each packages.
+If unsure, re-install the packages
+
+```{r}
+# install the packages of interest (only run once)
+# list.of.packages <- c("terra", "stars", "sf", "tidyverse", "glue")
+# 
+# install.packages(list.of.packages, dependencies  = TRUE)
+
+
+```
+
+
+```{r}
+# raster and shapefile manipulation packages
+library(terra) # make sure you are using the latest version of terra
+# library(stars)
+# library(sf)
+
+# data.tables manipulation packages
+library(tidyverse)
+
+# other packages
+library(glue) # to paste "changing" variables in a string
+
+
+```
+
+
+# List all the file paths as variables
+
+*Note:* you will need to adapt these file paths to fit the directory structure on your own computer
+
+```{r}
+a.number <- "a1677880"
+
+# local directory containing the data layers
+data.dir <- file.path("C:/Users", a.number, "SampleData_Simon")
+
+MODIS.MCD64.data.dir <- file.path(data.dir, "MCD64/SA_201911-202003")
+MODIS.MCD64.output.dir <- file.path(data.dir, "MCD64/Re-processed")
+# create the output folder if it doesn't exist already (only do it once)
+dir.create(MODIS.MCD64.output.dir, recursive = TRUE)
+
+```
+
+# Define the projection information
+
+```{r}
+# define the EPSG code to use (e.g. here GDA94 Australian Albers is a standard projection).
+# Note: you could also choose to set it to your region of interest (e.g. SA Lambert = 3107)
+EPSG <- "3577"
+Base.CRS <- paste0("epsg:", EPSG)
+
+# define the geographic coordinate system.
+# This should be the crs of the data downloaded from the Appeears website
+WGS84.CRS <- "epsg:4326"
+
+# MODIS.crs <- "SR-ORG:6974"
+# MODIS.crs.proj4 <- "+proj=sinu +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs "
+
+
+```
+
+# MODIS MCD64 - data processing
+
+## Load and mosaic the MODIS MCD64 files
+
+*Notes:* 
+
+  * The each file of the MODIS MCD64 dataset represents a month in a year for a specific location.
+  * The structure of each file is as follow:
+    `MCD64A1.AYYYYDDD.hXXvXX.061.2021309110507.hdf`
+    * AYYYYDDD: represents the year (YYYY), followed by the Julian day (DDD)
+    * hXXvXX: represents the horizontal (hXX) and vertical (vXX) coordinates of the MODIS tile. For example, in SA, the tile of interest is h29v12. We can use this to filter MODIS tiles of interest
+  * The `Burn Date` value of each cell within a file corresponds to the day of the year where the cell burnt. So it can be a values between 0 and 365 (or 366 for leap years)
+  We might need to reclassify the cell values to did it burn (value = 1) or not burn (value = 0)
+    
+  * The first line in the code below looks for files with specific patterns in the file names. Here for example, we are interested in MODIS tiles that contain `h29v12` in the file names and end with `.hdf`.
+  
+
+
+```{r}
+# define the year you are interested in
+# Note: you can change it to any year of interest or create a for() loop to run the calculations on each year automatically
+year = 2020
+
+# List the MODIS files for the year selected above
+MODIS.files.list <- list.files(MODIS.MCD64.data.dir, pattern = glue(".{year}.+h29v12.+[.]hdf$"), full.names = TRUE)
+
+# read the data in memory as a list of rasters
+MODIS.files <- lapply(MODIS.files.list, function(x){rast(x, subds = 1)}) # subds = 1 means that we want to load the first band of each dataset
+
+# stack all the raster layers together to create a single dataset with the same number of layers as there are elements in the MODIS.files.list
+MODIS.files <- rast(MODIS.files)
+
+# visualise/plot the raster layers
+terra::plot(MODIS.files)
+
+
+# replace the cell values that are not zero to 1 (= the cell has burnt)
+MODIS.files <- subst(MODIS.files, from = 1:366, to = 1)
+# replace the cell values that zero and below zero (= the cell has NOT burnt)
+MODIS.files <- subst(MODIS.files, from = -2:0, to = 0)
+
+# visualise the results
+terra::plot(MODIS.files, colNA = "navy")
+
+
+# sum all the layers together to create a single raster layer dataset
+MODIS.files <- app(MODIS.files, fun = "sum")
+
+# visualise the results
+terra::plot(MODIS.files, colNA = "navy")
+
+# Note: 
+# If the cell has a value greater than 1, it means that it has burnt two or more months in the year.
+# We'll need to decide later how we want to handle this. We can either set all the values greater than 1 to 1 or keep the value and consider it as burnt X months in a given year.
+
+# export the raster layer
+writeRaster(MODIS.files, filename = file.path(MODIS.MCD64.output.dir, glue("Number_of_times_burnt_{year}.tif")), filetype = "GTiff", datatype = 'INT4U', overwrite = TRUE)
+
+
+
+
+
+
+
+```
+
