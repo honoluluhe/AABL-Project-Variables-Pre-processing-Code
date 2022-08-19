@@ -1,0 +1,655 @@
+---
+title: "BARRA data pre-processing for Shoal's reference"
+author: "Douglas Radford"
+date: "Notebook Created 18 March 2021"
+params: 
+  d: !r Sys.Date()
+output: html_notebook
+html_document:
+  toc: TRUE
+  
+---
+
+## Description
+This script contains information on how UoA team processed wind data, temperature data, relative humidity data. 
+
+
+This code is to extract weather data at specific points across Adelaide and use this informaiton to calculate the daily maximum daily FFDI. The input data for this script is the BARRA dataset. 
+
+This information will be used to determine what weather data will be used in the fireconnect code.
+
+
+
+
+## Initialise Code Parameters
+
+```{r}
+### This first chunk is hidden ###
+  # The first chunk will load required packages, define input/intermediate/output files depending on the machine being used #
+  # The operations to do this are in the fireconnect_system_setup.R file #
+
+    source(file.path(getwd(), "firebehaviour_system_setup.R"))
+
+Applications
+Studies
+Paths
+
+```
+
+
+Set up the file. 
+
+```{r parameterisation, results='hide'}
+
+### Study Parameter Setup ####
+  # Choose the application and study, set up parameters for this purpose. #
+  # This includes loading and setting the EPSG, extent and template maps. #
+  # This also includes loading the relevant file paths and filenames for the application/study. #
+
+    # Application <- "Adelaide"
+    # Study <- "AdelaideUH"
+    
+    Application <- "WA"
+    Study <- "WesternAustraliaUH"
+
+    source(file.path(getwd(), "firebehaviour_parameterisation.R"))
+    
+  Paths$Output_BARRA <- file.path(Paths$Output_BARRA, paste(Date, Application, Study, sep = "_"))
+  if(dir.exists(Paths$Output_BARRA) == FALSE){dir.create(Paths$Output_BARRA)}
+    
+```
+
+
+```{r}
+
+### Additional Parameterisation ### 
+
+#Study location - used for timezone information - if possible, get with Sys.timezone() to match with timezone tools:
+Location <- "Australia/Adelaide"
+
+#Set the hours over which daily temperature will be summarised:
+  fire_hours <- c(12,13,14,15,16,17)
+  
+BARRA_CRS <- "epsg:4283"
+
+#Station Locations:
+  #Second Vally Forest Station #023875
+  #Mt Barker Station #023733
+  #Adelaide Airport Station #023034
+  #Strathalbyn Station #024580
+  #Nuriootpa Station #023373
+  #Latitude Coords
+    Lat <- c(-35.5695, -35.0732, -34.9524, -35.2836, -34.4761)
+    Lng <- c(138.2864, 138.8466, 138.5196, 138.8934, 139.0056)
+    # Station1 <- c(-35.5695, 138.2864)
+    # Station2 <- c(-35.0732, 138.8466)
+    # Station3 <- c(-34.9524, 138.5196)
+
+```
+
+Doug's explanation RE using the five stations: I wanted to know (generally) which days the region had a FFDI above a certain threshold. I calculate the FFDI at each station to save myself from calculating FFDI at every single grid cell at every single timestep. I also didn't want it to be just days which one random cell was above a threshold, so using the stations was a way to get around this.I determine the threshold though, by calculating the FFDI within historical fire scars, on the day of the fire - so in that case, the FFDI is calculated wherever the fire scar is, not where the stations are.For each day above the threshold, I also extract the weather layers for the entire region from the chosen daily hours, so this step involves the data across the entire region (not just at fires or at stations).It was all a bit convoluted haha, but just the process I decided to follow.
+
+```{r Define Input and Output Filepaths}
+
+var_names <- c("relhum-fc-prs-PT1H-BARRA_AD-v1-", "av_temp_scrn-fc-slv-PT1H-BARRA_AD-v1-", "uwnd10m-fc-spec-PT1H-BARRA_AD-v1-", "vwnd10m-fc-spec-PT1H-BARRA_AD-v1-")
+
+years <- list.dirs(Inputs[Inputs$Input_Name == "BARRA_relhum", "Raw_Input"], recursive = FALSE, full.names = FALSE)
+
+months <- list.dirs(file.path(Inputs[Inputs$Input_Name == "BARRA_relhum", "Raw_Input"], years[1]), recursive = FALSE, full.names = FALSE)
+
+#Create full list of days:
+  Dates <- list.files(Inputs[Inputs$Input_Name == "BARRA_relhum", "Raw_Input"], recursive = TRUE, pattern = ".sub.nc") %>% substr(40,47) %>% unique()
+
+#Desired Extent in Lat/Long
+# Ext_BARRA <- ext(template)
+  # Results: 137.9998, 139.4848, -35.72, -34.37  (xmin, xmax, ymin, ymax)
+  # the above method gave some approximate long lat coords, but I've standardised to make things a little easier:
+  #Ext_BARRA <- ext(c(137.9997,139.4982,-35.72675,-34.36325))
+  Ext_BARRA <- ext(project(Template, BARRA_CRS))
+  
+  
+#Template based on sfc_temp_raster
+  Template_BARRA <- rast(ext = c(130.993249998502, 142.009252442904, -39.5067499999897, -29.4897500152691), res = c(0.0135, 0.0135)) %>% crop(Ext_BARRA)
+
+#Load in Veg to use to subset only the landmass BARRA data
+  Veg <- rast(file.path(Paths$Input, Inputs[Inputs$Input_Name == "Vegetation", "Raw_Input"])) %>% crop(Ext_Study + 3000) %>% project(BARRA_CRS, method = "near")
+  Veg <- crop(Veg, Ext_BARRA)
+  Veg <- subst(Veg, from = 17, to = NA)
+  Veg <- subst(Veg, from = 0:100, to = 1)
+  Veg <- resample(Veg, Template_BARRA, method = "min")
+  plot(Veg)
+  plot(Ext_BARRA, add=TRUE)
+  
+  #Want to replace Veg with cells which match the BARRA IDs which will later be assigned.
+    rep_IDs <- values(Veg)
+    rep_IDs[is.na(rep_IDs)==FALSE] <- 1:length(na.omit(rep_IDs))
+    BARRA_ID <- Template_BARRA
+    BARRA_ID[] <- rep_IDs
+    plot(BARRA_ID)
+      writeRaster(BARRA_ID, file.path(Paths$Output_BARRA, "211012_BARRA_ID_DR.tif"),  gdal="COMPRESS=LZW")
+
+#Load in Fire History shapefile.
+  Fire_History <- vect(file.path(Paths$Input, Inputs[Inputs$Input_Name == "Fire_History", "Raw_Input"])) %>% crop(Ext_BARRA) %>% project(BARRA_CRS)
+
+#Subset Fire_history by: fires in desired extent; fires which occurred in the weather record; fires which have a reliable date on record only, and; by bushfire type
+  Fire_History$FIREDATE_alt <- str_remove_all(Fire_History$FIREDATE, "/")
+  Fire_History <- Fire_History[Fire_History$DATERELIAB == 1]
+  Fire_History <- Fire_History[Fire_History$FIREDATE_alt > 19900102 & Fire_History$FIREDATE_alt < 20190228]
+  Fire_History <- Fire_History[Fire_History$INCIDENTTY == "Bushfire"]
+  
+#Create Station Points polygons
+  StationPoints <- cbind(Lng, Lat) %>% SpatialPoints(proj4string = CRS(paste0("+init=",EPSG_Study))) %>% vect() 
+  StationPoints$Names <- c("Second Vally Forest Station #023875", "Mt Barker Station #023733", "Adelaide Airport Station #023034", "Strathalbyn Station #024580", "Nuriootpa Station #023373")
+#Plot 
+  plot(Ext_BARRA)
+  plot(Fire_History, "FIREDATE", alpha=0.5, add=TRUE)
+  plot(StationPoints, add=TRUE, cex =1, pty = 2, col = "red")
+  terra::text(StationPoints, "Names", pos=4)
+
+          
+```
+
+Load relevant files in. Crop to a convenient size.
+
+##Temperature data
+Temperature data is converted from Kelvin to Celcius.
+
+##Wind Speed Data
+Zonal flow is defined as west to east or east to west, while meridional flow indicates north-to-south or south-to-north air motion
+  uwnd is zonal (ie west to east)
+  vwnd is meridonal (north to south)
+
+Note that the u and v wind data is on a slightly different grid originally, so it has to be resampled.
+Wind speed is calculated using Pythagoras and converted to kmph.
+Wind direction is calculated using trigonometry and converted from polar coordinates in radians into cardinal/compass degrees. 
+
+## Calculate the maximum daily FFDI for each day on record at selected Representative Weather Station Points
+
+The below code calculates the maximum FFDI across each day in the BARRA record at a select number of weather station locations. 
+
+Weather station locations have been generally chosen as the data could be cross-validated, and the sites hopefully represent a good cross-section across the Adelaide region. 
+
+```{r Calculate Max FFDI All Days}
+
+#Load in results if already run and saved.
+  #max_FFDI_store <- read.csv(file.path(Paths$Output_BARRA, paste0("210917_Max_Daily_FFDI_DR.csv")))
+  #colnames(max_FFDI_store) <- c("Date", "SecondValley","MtBarker", "AdelaideAirport", "Strathalbyn", "Nuriootpa")
+
+#Set up matrix to store results:
+max_FFDI_store <- matrix(data=NA, nrow = (length(Dates)-1), ncol = (length(StationPoints)+1))
+
+Sys_time_start <- Sys.time()
+
+for(index in 2:length(Dates)) {
+
+tdate <- Dates[index]
+max_FFDI_store[index-1, 1] <- as.double(tdate)
+
+#Enter path time to stipulate which year/month/date to look at.
+  path_year <- substr(tdate,1,4)
+  path_month <- substr(tdate,5,6)
+  path_date <- substr(tdate,7,8)
+  pattern_time_1 <- tdate
+
+#Determine required extract for climate data between 11:30am - 5:30pm each day (ACST)
+#UTC of 2am is ACST 11:30am, 8am UTC is 5:30pm ACST
+#Given that each raster of a given date goes from 4am to 4am the next day, we'll have to extract both the last hours of one day and the first hours of the next in using UTC
+
+#Determine day beforehand, I've done this using the full list of days to be careful for months/leap years etc.
+  pattern_time_0 <- paste0(Dates[index-1], "T1800Z.sub.nc")
+#Determine the file path for each file.
+  path_time_0 <- paste0(substr(pattern_time_0,1,4),"/",substr(pattern_time_0,5,6))
+  path_time_1 <- paste0(substr(pattern_time_1,1,4),"/",substr(pattern_time_1,5,6))
+#Update first pattern to include hours
+  pattern_time_1 <- paste0(pattern_time_1, "T0000Z.sub.nc")
+
+#Create list of files from the last hours of the previous day (UTC) and the first hours of the day of interest (UTC)
+  relhum_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_relhum", "Raw_Input"], c(paste0(path_time_0, "/", var_names[1], pattern_time_0), paste0(path_time_1, "/", var_names[1], pattern_time_1)), sep = "/")
+
+  scrn_temp_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_temperature", "Raw_Input"], c(paste0(path_time_0, "/", var_names[2], pattern_time_0), paste0(path_time_1, "/", var_names[2], pattern_time_1)), sep = "/")
+
+  uwnd10m_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_uwnd", "Raw_Input"], c(paste0(path_time_0, "/", var_names[3], pattern_time_0), paste0(path_time_1, "/", var_names[3], pattern_time_1)), sep = "/")
+
+  vwnd10m_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_vwnd", "Raw_Input"], c(paste0(path_time_0, "/", var_names[4], pattern_time_0), paste0(path_time_1, "/", var_names[4], pattern_time_1)), sep = "/")
+
+  #Check if all files exist for the timestep, and if so, then load in the rasters as per the filenames.
+if(all(file.exists(c(relhum_Files, scrn_temp_Files, uwnd10m_Files, vwnd10m_Files)))){
+    
+    relhum_Raster <- rast(relhum_Files)
+    relhum_Raster <- subset(relhum_Raster, which(substr(with_tz(time(relhum_Raster),tz = Location),12,13) %in% fire_hours))
+    #names(relhum_Raster) <- paste("Relative Humidity", with_tz(time(relhum_Raster),Location))
+
+    scrn_temp_Raster <- rast(scrn_temp_Files)
+    scrn_temp_Raster <- subset(scrn_temp_Raster, which(substr(with_tz(time(scrn_temp_Raster),tz = Location),12,13) %in% fire_hours))
+    #names(sfc_temp_Raster) <- paste("Temperature", with_tz(time(sfc_temp_Raster),Location))
+
+    uwnd10m_Raster <- rast(uwnd10m_Files)
+    uwnd10m_Raster <- subset(uwnd10m_Raster, which(substr(with_tz(time(uwnd10m_Raster),tz = Location),12,13) %in% fire_hours))
+
+    vwnd10m_Raster <- rast(vwnd10m_Files)
+    vwnd10m_Raster <- subset(vwnd10m_Raster, which(substr(with_tz(time(vwnd10m_Raster),tz = Location),12,13) %in% fire_hours))
+
+    scrn_temp_Points <- extract(scrn_temp_Raster, StationPoints)
+    relhum_Points <- extract(relhum_Raster, StationPoints)
+    uwnd10m_Points <- extract(uwnd10m_Raster, StationPoints)
+    vwnd10m_Points <- extract(vwnd10m_Raster, StationPoints)
+
+    scrn_temp_Points <- scrn_temp_Points[,-1]
+    relhum_Points <- relhum_Points[,-1]
+    uwnd10m_Points <- uwnd10m_Points[,-1]
+    vwnd10m_Points <- vwnd10m_Points[,-1]
+
+  #Convert temperature raster to deg. c.
+    scrn_temp_Points <- scrn_temp_Points-273.15
+
+  #Calculate wind magnitude raster and convert to kmph for FFDI calc.
+    wnd10m_Points <- sqrt(uwnd10m_Points^2 + vwnd10m_Points^2)
+    wnd10m_Points <- wnd10m_Points*60*60/1000
+    #names(wnd10m_Raster_kmph) <- paste("Wind Speed", with_tz(time(wnd10m_Raster_kmph),Location))
+
+  #Calculate the FFDI for the day:
+    FFDI_Points <- 2.0*exp(-0.450 + 0.987*log(10) - 0.0345*relhum_Points +0.0338*scrn_temp_Points + 0.0234*wnd10m_Points)
+
+    max_FFDI_Points <- apply(FFDI_Points, MARGIN = 1, "max")
+
+    max_FFDI_store[index-1, 2:6] <- max_FFDI_Points[]
+  
+  } 
+}  
+
+Sys_time_finish <- Sys.time()
+
+Sys_time_finish - Sys_time_start
+
+head(max_FFDI_store)
+
+colnames(max_FFDI_store) <- c("Date", "SecondValley","MtBarker", "AdelaideAirport", "Strathalbyn", "Nuriootpa")
+
+write.csv(max_FFDI_store, file.path(Paths$Output_BARRA, paste0(Date, "_Max_Daily_FFDI_DR.csv")))
+
+max_FFDI_store <- as.data.frame(max_FFDI_store)
+
+```
+
+
+##Calculate the FFDI at the location of each historical fire
+
+#Method: 
+  #Step 1: For each fire:
+    #Step 1.1: Extract fire date
+    #Step 1.2: Load Weather parameters for that fire date
+    #Step 1.3: Extract Fire Scar Centroid
+    #Step 1.4: Extract weather parameters for centroid at each hour between midday - 6pm
+    #Step 1.5: Calc FFDI at each hour
+    #Step 1.6: return max FFDI over time period for fire
+  #Step 2: Calculate total burnt area in record
+  #Step 3: Calculate min FFDI at which > 95% of total area burnt at. 
+
+With 317 fires qualifying for analysis, the total run time of the below code is approximately 5 minutes.
+  
+```{r}
+
+n_Fires <- length(Fire_History)
+Fire_History$maxFFDI <- 0.0
+Fire_History$meanFFDI <- 0.0
+Fire_History$minFFDI <- 0.0
+
+Sys_time_start <- Sys.time()
+
+for (index in 1:n_Fires){
+  
+  temp_Fire <- Fire_History[index]
+  temp_Cent <- centroids(temp_Fire)
+  
+  temp_Date <- str_remove_all(temp_Fire$FIREDATE,"/")
+  
+      path_year <- substr(temp_Date,1,4)
+      path_month <- substr(temp_Date,5,6)
+      path_date <- substr(temp_Date,7,8)
+      pattern_time_1 <- temp_Date
+    
+    
+    #Determine day beforehand, I've done this using the full list of days to be careful for months/leap years etc.
+      pattern_time_0 <- paste0(Dates[which(Dates==pattern_time_1)-1], "T1800Z.sub.nc")
+    #Determine the file path for each file.
+      path_time_0 <- paste0(substr(pattern_time_0,1,4),"/",substr(pattern_time_0,5,6))
+      path_time_1 <- paste0(substr(pattern_time_1,1,4),"/",substr(pattern_time_1,5,6))
+    #Update first pattern to include hours
+      pattern_time_1 <- paste0(pattern_time_1, "T0000Z.sub.nc")
+    
+    #Create list of files from the last hours of the previous day (UTC) and the first hours of the day of interest (UTC)
+      relhum_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_relhum", "Raw_Input"], c(paste0(path_time_0, "/", var_names[1], pattern_time_0), paste0(path_time_1, "/", var_names[1], pattern_time_1)), sep = "/")
+    
+      scrn_temp_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_temperature", "Raw_Input"], c(paste0(path_time_0, "/", var_names[2], pattern_time_0), paste0(path_time_1, "/", var_names[2], pattern_time_1)), sep = "/")
+    
+      uwnd10m_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_uwnd", "Raw_Input"], c(paste0(path_time_0, "/", var_names[3], pattern_time_0), paste0(path_time_1, "/", var_names[3], pattern_time_1)), sep = "/")
+    
+      vwnd10m_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_vwnd", "Raw_Input"], c(paste0(path_time_0, "/", var_names[4], pattern_time_0), paste0(path_time_1, "/", var_names[4], pattern_time_1)), sep = "/")
+    
+      #Check if all files exist for the timestep, and if so, then load in the rasters as per the filenames.
+    if(all(file.exists(c(relhum_Files, scrn_temp_Files, uwnd10m_Files, vwnd10m_Files)))){
+        
+        relhum_Raster <- rast(relhum_Files)
+        relhum_Raster <- subset(relhum_Raster, which(substr(with_tz(time(relhum_Raster),tz = Location),12,13) %in% fire_hours))
+        #names(relhum_Raster) <- paste("Relative Humidity", with_tz(time(relhum_Raster),Location))
+    
+        scrn_temp_Raster <- rast(scrn_temp_Files)
+        scrn_temp_Raster <- subset(scrn_temp_Raster, which(substr(with_tz(time(scrn_temp_Raster),tz = Location),12,13) %in% fire_hours))
+        #names(sfc_temp_Raster) <- paste("Temperature", with_tz(time(sfc_temp_Raster),Location))
+    
+        uwnd10m_Raster <- rast(uwnd10m_Files)
+        uwnd10m_Raster <- subset(uwnd10m_Raster, which(substr(with_tz(time(uwnd10m_Raster),tz = Location),12,13) %in% fire_hours))
+        uwnd10m_Raster <- resample(uwnd10m_Raster, Template_BARRA, method = "near")
+        
+        vwnd10m_Raster <- rast(vwnd10m_Files)
+        vwnd10m_Raster <- subset(vwnd10m_Raster, which(substr(with_tz(time(vwnd10m_Raster),tz = Location),12,13) %in% fire_hours))
+        vwnd10m_Raster <- resample(vwnd10m_Raster, Template_BARRA, method = "near")
+    }
+      
+    #Take some points from the sfc_temp_raster which intersect with the temp_fire - use these points to extract values from all other rasters - this is necessary since the wind rasters do not align.  
+      Fire_Points <- crop(Veg, temp_Fire) %>% as.points()
+      
+        scrn_temp_Points <- terra::extract(scrn_temp_Raster, Fire_Points, touches=TRUE, method = "simple")
+        relhum_Points <- extract(relhum_Raster, Fire_Points, touches=TRUE, method = "simple")
+        uwnd10m_Points <- extract(uwnd10m_Raster, Fire_Points, touches=TRUE, method = "simple")
+        vwnd10m_Points <- extract(vwnd10m_Raster, Fire_Points, touches=TRUE, method = "simple")
+
+        #Get rid of ID column
+        scrn_temp_Points <- scrn_temp_Points[-1]
+        relhum_Points <- relhum_Points[-1]
+        uwnd10m_Points <- uwnd10m_Points[-1]
+        vwnd10m_Points <- vwnd10m_Points[-1]
+    
+      #Convert temperature raster to deg. C.
+        scrn_temp_Points <- scrn_temp_Points-273.15
+    
+      #Calculate wind magnitude raster and convert to kmph for FFDI calc.
+        wnd10m_Points <- sqrt(uwnd10m_Points^2 + vwnd10m_Points^2)
+        wnd10m_Points <- wnd10m_Points*60*60/1000
+        #names(wnd10m_Raster_kmph) <- paste("Wind Speed", with_tz(time(wnd10m_Raster_kmph),Location))
+    
+      #Calculate the FFDI for the day:
+        FFDI_Points <- 2.0*exp(-0.450 + 0.987*log(10) - 0.0345*relhum_Points +0.0338*scrn_temp_Points + 0.0234*wnd10m_Points)
+        
+        Fire_History$maxFFDI[index] <- max(unlist(FFDI_Points))
+        Fire_History$meanFFDI[index] <- mean(unlist(FFDI_Points))
+        Fire_History$minFFDI[index] <- min(unlist(FFDI_Points))
+}
+
+Sys_time_finish <- Sys.time()
+
+Sys_time_finish - Sys_time_start
+
+#Determine FFDI at which more than PERCENTILE% of burnt area occurred on
+  Percentile <- 0.95
+  Total_Burn_Area <- sum(Fire_History$HECTARES)
+  Percentile_Total_Burn_Area <- Percentile*Total_Burn_Area
+  
+  Fire_History_df <- as.data.frame(Fire_History)
+  
+#Order the rows in the dataframe from highest FFDI to lowest using the max FFDI column:
+    Fire_History_df <- Fire_History_df[order(Fire_History_df$maxFFDI, decreasing = TRUE), ]
+  #Add column with the cumulative sum of burnt area
+    Fire_History_df <- mutate(Fire_History_df, csum_bymax = cumsum(HECTARES))
+#Order the rows in the dataframe from highest FFDI to lowest using the mean FFDI column:
+    Fire_History_df <- Fire_History_df[order(Fire_History_df$meanFFDI, decreasing = TRUE), ]
+  #Add column with the cumulative sum of burnt area
+    Fire_History_df <- mutate(Fire_History_df, csum_bymean = cumsum(HECTARES))
+#Order the rows in the dataframe from highest FFDI to lowest using the mean FFDI column:
+    Fire_History_df <- Fire_History_df[order(Fire_History_df$minFFDI, decreasing = TRUE), ]
+  #Add column with the cumulative sum of burnt area
+    Fire_History_df <- mutate(Fire_History_df, csum_bymin = cumsum(HECTARES))
+
+Fire_History_df$PercentBurnedatFFDI_max <- (sum(Fire_History_df$HECTARES)-Fire_History_df$csum_bymax)/sum(Fire_History_df$HECTARES)
+Fire_History_df$PercentBurnedatFFDI_mean <- (sum(Fire_History_df$HECTARES)-Fire_History_df$csum_bymean)/sum(Fire_History_df$HECTARES)
+    
+plot(Fire_History_df$maxFFDI, Fire_History_df$PercentBurnedatFFDI_max, )
+
+#Extract FFDI of all points which make up the largest 
+  min_FFDI <- Fire_History_df$maxFFDI[which.min(abs(Fire_History_df$csum_bymax - Percentile_Total_Burn_Area))]
+
+max_FFDI_store$MaxStations <- max_FFDI_store[ , c("SecondValley", "MtBarker", "AdelaideAirport", "Strathalbyn", "Nuriootpa")] %>% apply(MARGIN = 1, "max")
+
+head(max_FFDI_store)
+
+Fire_Days <- subset(max_FFDI_store, MaxStations > min_FFDI)
+write.csv(Fire_Days, file.path(Paths$Output_BARRA, paste0(Date, "_FireDays_DR.csv")))
+#Fire_Days <- read.csv(file.path(Paths$Output_BARRA, paste0(Date, "_FireDays_DR.csv")))
+
+length(Fire_Days$Date)
+  
+```
+
+
+
+## Extract all Weather Data at all cells from all Fire Days (noon-5pm) to Create Percentile Breaks for Frequency Analysis
+
+Include a subset of the points such that we exclude the BARRA cells which don't cover the land mass.
+
+With one BARRA cell point, the code takes 17.4 minutes to run.
+
+```{r}
+#Create template of points to extract BARRA data from rasters with, only include points over land mass using the Veg raster
+  Points <- Veg %>% as.points()
+  names(Points) <- "BARRA_ID"
+  Points$BARRA_ID[] <- 1:length(Points)
+  writeVector(Points, file.path(Paths$Output_BARRA, paste0(Date, "_BARRAPoints.shp")), filetype = "ESRI Shapefile", overwrite = T)
+  plot(Points)
+
+  #Calculate the number of entries to the data.table per loop for each parameter
+    n_perpoint <- length(fire_hours)
+    n_perloop <- length(fire_hours) * length(Points[])
+    point_labels <- rep(c(1:length(Points[])), each=length(fire_hours))
+    
+  Fire_Dates <- Fire_Days$Date
+  
+  temp <- matrix(data=NA, nrow = n_perloop, ncol = 6)
+  
+  Weather_History <- data.table()
+  
+  #Initialise progress bar code:
+    pb <- txtProgressBar(min = 1, max = length(Fire_Dates), style = 3)
+    counter <- 1
+  
+Sys_time_start <- Sys.time()
+
+for (temp_Date in Fire_Dates){
+  
+      path_year <- substr(temp_Date,1,4)
+      path_month <- substr(temp_Date,5,6)
+      path_date <- substr(temp_Date,7,8)
+      pattern_time_1 <- temp_Date
+    
+    
+    #Determine day beforehand, I've done this using the full list of days to be careful for months/leap years etc.
+      pattern_time_0 <- paste0(Dates[which(Dates==pattern_time_1)-1], "T1800Z.sub.nc")
+    #Determine the file path for each file.
+      path_time_0 <- paste0(substr(pattern_time_0,1,4),"/",substr(pattern_time_0,5,6))
+      path_time_1 <- paste0(substr(pattern_time_1,1,4),"/",substr(pattern_time_1,5,6))
+    #Update first pattern to include hours
+      pattern_time_1 <- paste0(pattern_time_1, "T0000Z.sub.nc")
+    
+    #Create list of files from the last hours of the previous day (UTC) and the first hours of the day of interest (UTC)
+        relhum_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_relhum", "Raw_Input"], c(paste0(path_time_0, "/", var_names[1], pattern_time_0), paste0(path_time_1, "/", var_names[1], pattern_time_1)), sep = "/")
+      
+        scrn_temp_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_temperature", "Raw_Input"], c(paste0(path_time_0, "/", var_names[2], pattern_time_0), paste0(path_time_1, "/", var_names[2], pattern_time_1)), sep = "/")
+      
+        uwnd10m_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_uwnd", "Raw_Input"], c(paste0(path_time_0, "/", var_names[3], pattern_time_0), paste0(path_time_1, "/", var_names[3], pattern_time_1)), sep = "/")
+      
+        vwnd10m_Files <- paste(Inputs[Inputs$Input_Name == "BARRA_vwnd", "Raw_Input"], c(paste0(path_time_0, "/", var_names[4], pattern_time_0), paste0(path_time_1, "/", var_names[4], pattern_time_1)), sep = "/")
+    
+      #Check if all files exist for the timestep, and if so, then load in the rasters as per the filenames.
+    if(all(file.exists(c(relhum_Files, scrn_temp_Files, uwnd10m_Files, vwnd10m_Files)))){
+        
+        relhum_Raster <- rast(relhum_Files)
+        relhum_Raster <- subset(relhum_Raster, which(substr(with_tz(time(relhum_Raster),tz = Location),12,13) %in% fire_hours))
+        #names(relhum_Raster) <- paste("Relative Humidity", with_tz(time(relhum_Raster),Location))
+    
+        scrn_temp_Raster <- rast(scrn_temp_Files)
+        scrn_temp_Raster <- subset(scrn_temp_Raster, which(substr(with_tz(time(scrn_temp_Raster),tz = Location),12,13) %in% fire_hours))
+        #names(sfc_temp_Raster) <- paste("Temperature", with_tz(time(sfc_temp_Raster),Location))
+    
+        uwnd10m_Raster <- rast(uwnd10m_Files)
+        uwnd10m_Raster <- subset(uwnd10m_Raster, which(substr(with_tz(time(uwnd10m_Raster),tz = Location),12,13) %in% fire_hours))
+        uwnd10m_Raster <- resample(uwnd10m_Raster, Template_BARRA, method = "near")
+        
+        vwnd10m_Raster <- rast(vwnd10m_Files)
+        vwnd10m_Raster <- subset(vwnd10m_Raster, which(substr(with_tz(time(vwnd10m_Raster),tz = Location),12,13) %in% fire_hours))
+        vwnd10m_Raster <- resample(vwnd10m_Raster, Template_BARRA, method = "near")
+    }
+      
+
+        scrn_temp_Points <- extract(scrn_temp_Raster, Points, touches=TRUE, method = "simple")
+        relhum_Points <- extract(relhum_Raster, Points, touches=TRUE, method = "simple")
+        uwnd10m_Points <- extract(uwnd10m_Raster, Points, touches=TRUE, method = "simple")
+        vwnd10m_Points <- extract(vwnd10m_Raster, Points, touches=TRUE, method = "simple")
+
+        #Get rid of ID column
+        scrn_temp_Points <- scrn_temp_Points[-1]
+        relhum_Points <- relhum_Points[-1]
+        uwnd10m_Points <- uwnd10m_Points[-1]
+        vwnd10m_Points <- vwnd10m_Points[-1]
+ 
+        temp[1:n_perloop,1] <- point_labels
+        temp[1:n_perloop,2] <- rep(temp_Date,n_perloop)
+        temp[1:n_perloop,3] <- unlist(as.list(t(scrn_temp_Points)))
+        temp[1:n_perloop,4] <- unlist(as.list(t(relhum_Points)))
+        temp[1:n_perloop,5] <- unlist(as.list(t(uwnd10m_Points)))
+        temp[1:n_perloop,6] <- unlist(as.list(t(vwnd10m_Points)))
+        
+        Weather_History <- rbind(Weather_History, temp)
+        
+        setTxtProgressBar(pb, counter)
+        counter <- counter+1 
+  }
+
+Sys_time_finish <- Sys.time()
+
+Sys_time_finish - Sys_time_start
+
+#Time difference of 0.555207 secs - 1 time loop, 1 point
+#Time difference of 0.5465369 secs - 1 time loop, 3 points
+#Time difference of 1.118005 secs - 3 time loops, 1 point
+#Time difference of 1.541934 secs - 3 time loops, 3 points
+#Time difference of 0.576457 secs - 1 time loop, 10 points
+#Time difference of 45.46689 mins - 2009 time loops, all ~7364 points over landmass in Adelaide extent
+
+names(Weather_History) <- c("ID", "Date", "Temperature", "RelativeHumidity", "WindDirection_u", "WindDirection_v")
+
+      #Convert temperature raster to deg. C.
+        Weather_History$Temperature <- Weather_History$Temperature-273.15
+    
+      #Calculate wind magnitude  and convert to kmph for FFDI calc.
+        Weather_History$WindMagnitude <- sqrt(Weather_History$WindDirection_u^2 + Weather_History$WindDirection_v^2)*60*60/1000
+
+      #Calculate wind direction
+        Weather_History$WindDirection <- atan2(Weather_History$WindDirection_u, Weather_History$WindDirection_v)*180.0/pi
+          #Convert from polar angle to compass:
+            Weather_History$WindDirection <- (450.0 - Weather_History$WindDirection)%%360.0
+            
+#Export results
+  fwrite(Weather_History, file.path(Paths$Output_BARRA, paste0(Date, "_WeatherHistory_DR.csv")), row.names = FALSE)
+  #Weather_History <- fread(file.path(Paths$Output_BARRA, paste0(Date, "_WeatherHistory_DR.csv"))
+            
+#Determine quantiles for plotting:
+  percentile_10_ws <- quantile(Weather_History$WindMagnitude, probs = seq(0,1,0.1))
+  percentile_20_ws <- quantile(Weather_History$WindMagnitude, probs = seq(0,1,0.2))
+  
+#Calculate wind rose for entire region across all times using historical data.
+  windRose(Weather_History, ws="WindMagnitude", wd="WindDirection", breaks = percentile_10_ws)
+
+#Find the IDs of the Points closest to the Station Points:
+  crs(Points) <- crs(StationPoints)
+  nearest(StationPoints, Points)$to_id
+  
+#Plot windroses for each station location:
+  #First plot locations:
+    plot(Veg, legend = FALSE, col = "black")
+    plot(StationPoints, add=TRUE, col="red")
+    terra::text(StationPoints, "Names", pos=4, col="red")
+  
+  #Second Valley Forest Station #023875
+    windRose(Weather_History[ID == 6862,], ws="WindMagnitude", wd="WindDirection", breaks = percentile_20_ws, main = "Second Valley Forest Station #023875")
+  #Mt Barker Station #023733
+    windRose(Weather_History[ID == 4180,], ws="WindMagnitude", wd="WindDirection", breaks = percentile_20_ws, main = "Mt Barker Station #023733")
+  #Adelaide Airport Station #023034
+    windRose(Weather_History[ID == 3495,], ws="WindMagnitude", wd="WindDirection", breaks = percentile_20_ws, main = "Adelaide Airport Station #023034")
+  #Strathalbyn Station #024580
+    windRose(Weather_History[ID == 5405,], ws="WindMagnitude", wd="WindDirection", breaks = percentile_20_ws, main = "Strathalbyn Station #024580")
+  #Nuriootpa Station #023373
+    windRose(Weather_History[ID == 800,], ws="WindMagnitude", wd="WindDirection", breaks = percentile_20_ws, main = "Nuriootpa Station #023373")
+    
+```
+
+## Undertake Frequency Analysis for each cell in BARRA Raster
+
+We create a frequency table for each cell where the table is 4-dimensional (classes for wind direction, wind speed, temperature and relative humidity)
+
+Matrix dimensions = (n_cells, n_winddirections, n_temperature, n_relhum, n_windspeed)
+
+each dimension is split into classes based on the analysis in 
+
+```{r}
+#Determine how many percentile groups to split data into. 
+#Potential to test sensitivity of final results to changing the number of breaks that are used
+n_breaks <- 4
+n_breaks_winddir <- 8
+
+#Add a column which designates the percentile class within which each temperature point sits 
+Weather_History[, `:=`(Temperature_percentilegroup = .bincode(x = ecdf(Temperature)(Temperature), breaks = seq(0,1,1/n_breaks), right = TRUE, include.lowest = TRUE))]
+  #plot resulting histogram:
+      # hist(Weather_History[, Temperature], breaks=16)
+      # for(i in 1:n_breaks){
+      #   hist(Weather_History[Temperature_percentilegroup==i, Temperature], add=TRUE, breaks=n_breaks, col = rainbow_hcl(n_breaks, alpha=0.8)[i])
+      # }
+
+#Add a column which designates the percentile class within which each relative humidity point sits
+Weather_History[, `:=`(RelativeHumidity_percentilegroup = .bincode(x = ecdf(RelativeHumidity)(RelativeHumidity), breaks = seq(0,1,1/n_breaks), right = TRUE, include.lowest = TRUE))]
+  #plot resulting histogram:
+      # hist(Weather_History[, RelativeHumidity], breaks=16)
+      # for(i in 1:n_breaks){
+      #   hist(Weather_History[RelativeHumidity_percentilegroup==i, RelativeHumidity], add=TRUE, breaks=n_breaks, col = rainbow_hcl(n_breaks, alpha=0.8)[i])
+      # }
+      
+#Add a column which designates the percentile class within which each windspeed point sits
+Weather_History[, `:=`(WindMagnitude_percentilegroup = .bincode(x = ecdf(WindMagnitude)(WindMagnitude), breaks = seq(0,1,1/n_breaks), right = TRUE, include.lowest = TRUE))]
+  #plot resulting histogram:
+      # hist(Weather_History[, WindMagnitude], breaks=16)
+      # for(i in 1:n_breaks){
+      #   hist(Weather_History[WindMagnitude_percentilegroup==i, WindMagnitude], add=TRUE, breaks=n_breaks, col = rainbow_hcl(n_breaks, alpha=0.8)[i])
+      # }
+      
+#Create bins for wind direction, this time based on compass breaks rather than percentiles:
+      angle_width <- 360/n_breaks_winddir
+      wind_breaks <- c(0.0, seq(angle_width/2, 360-angle_width/2, angle_width), 360)
+      n_windgroups <- 
+Weather_History[, `:=`(WindDirection_group = .bincode(x = WindDirection, breaks = wind_breaks, right = TRUE, include.lowest = TRUE))]
+      #Reclassify the last group (the high side of 0 degrees ie. 337.5-360), to being in the first group.
+        Weather_History[WindDirection_group == 9, WindDirection_group := 1]
+  #plot resulting historgram
+      # hist(Weather_History$WindDirection_group)
+      
+#Calculate frequency of occurrences in each class for each ID point
+  ClassFrequency <- Weather_History[, .N,by=.(ID, Temperature_percentilegroup, RelativeHumidity_percentilegroup, WindMagnitude_percentilegroup, WindDirection_group)]
+  ClassFrequency$Probability <- ClassFrequency$N/length(Weather_History[ID==1,ID])
+  
+#Calculate representative values to use for each class (could use mean or median, but it seems there is not typically a big difference)
+  ClassValues <- data.table(ClassLabel = 1:max(n_breaks, n_breaks_winddir), CentralWindDirection = seq(0,360-angle_width, angle_width), Temperature = NA, RelativeHumidity = NA, WindMagnitude = NA)
+  ClassValues$CentralWindDirection <- seq(0,360-angle_width, angle_width)
+  ClassValues$Temperature[1:n_breaks] <- unlist(Weather_History[, median(Temperature), by=.(Temperature_percentilegroup)][order(Temperature_percentilegroup)][,2])
+  ClassValues$RelativeHumidity[1:n_breaks] <- unlist(Weather_History[, median(RelativeHumidity), by=.(RelativeHumidity_percentilegroup)][order(RelativeHumidity_percentilegroup)][,2])
+  ClassValues$WindMagnitude[1:n_breaks] <- unlist(Weather_History[, median(WindMagnitude), by=.(WindMagnitude_percentilegroup)][order(WindMagnitude_percentilegroup)][,2])
+  
+#Export results
+   fwrite(Weather_History, file.path(Paths$Output_BARRA, paste0(Date, "WeatherHistory_PercentileGroups_DR.csv")), row.names = FALSE)
+  # Weather_History <- fread(file.path(BARRA_Out, "211012_WeatherHistory_PercentileGroups_DR.csv"))
+  # 
+   fwrite(ClassFrequency, file.path(Paths$Output_BARRA, paste0(Date, "_BARRA_ClassFrequency_DR.csv")), row.names = FALSE)
+  # ClassFrequency <- fread(file.path(BARRA_Out, "211012_BARRA_ClassFrequency_DR.csv"))
+  # 
+   fwrite(ClassValues, file.path(Paths$Output_BARRA, paste0(Date, "_BARRA_ClassValues_DR.csv")), row.names = FALSE)
+  # ClassValues <- fread(file.path(BARRA_Out, "211012_BARRA_ClassValues_DR.csv"))
+  # 
+```
+
+
